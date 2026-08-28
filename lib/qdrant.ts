@@ -9,7 +9,19 @@ export const VECTOR_DIMENSION = 2048; // Nemotron-3-embed-1b vector dimension re
 export const qdrantClient = new QdrantClient({
   url: QDRANT_URL,
   apiKey: QDRANT_API_KEY || undefined,
+  checkCompatibility: false,
 });
+
+function formatQdrantError(e: any): string {
+  const isConnRefused =
+    e?.code === 'ECONNREFUSED' ||
+    e?.cause?.code === 'ECONNREFUSED' ||
+    (typeof e?.message === 'string' && (e.message.includes('fetch failed') || e.message.includes('ECONNREFUSED')));
+  if (isConnRefused) {
+    return 'Server offline (ECONNREFUSED)';
+  }
+  return e?.message || String(e);
+}
 
 // In-Memory Qdrant Payload Repository (Ensures 100% smooth demo execution when local Qdrant server is uninitialized)
 const memoryPoints: Map<string, QdrantPoint> = new Map();
@@ -130,7 +142,7 @@ export async function ensureQdrantCollection(): Promise<boolean> {
     }
     return true;
   } catch (e) {
-    console.warn('Qdrant server unavailable, operating with in-memory payload engine:', e);
+    console.warn(`Qdrant server unavailable, operating with in-memory payload engine: ${formatQdrantError(e)}`);
     return false;
   }
 }
@@ -167,7 +179,7 @@ export async function upsertQdrantPoints(points: QdrantPoint[]): Promise<boolean
     }
     return true;
   } catch (e) {
-    console.warn('Qdrant upsert falling back to memory store:', e);
+    console.warn(`Qdrant upsert falling back to memory store: ${formatQdrantError(e)}`);
     return true;
   }
 }
@@ -201,7 +213,7 @@ export async function searchQdrantPayloads(
       }));
     }
   } catch (e) {
-    console.warn('Qdrant external query failed, performing in-memory cosine search:', e);
+    console.warn(`Qdrant external query failed, performing in-memory cosine search: ${formatQdrantError(e)}`);
   }
 
   // If external Qdrant returned no points or is offline, perform vector cosine distance over memory points
@@ -238,7 +250,7 @@ export async function getAllQdrantPayloads(dealId?: string): Promise<QdrantPaylo
       return scrollResponse.points.map(p => p.payload as unknown as QdrantPayload);
     }
   } catch (e) {
-    console.warn('Qdrant scroll fallback to memory store:', e);
+    console.warn(`Qdrant scroll fallback to memory store: ${formatQdrantError(e)}`);
   }
 
   const memoryArr = Array.from(memoryPoints.values());
@@ -256,7 +268,7 @@ export async function deleteQdrantPointsForDocument(dealId: string, documentName
       },
     });
   } catch (e) {
-    console.warn('Qdrant delete document points warning:', e);
+    console.warn(`Qdrant delete document points warning: ${formatQdrantError(e)}`);
   }
 
   for (const [id, pt] of memoryPoints.entries()) {
@@ -282,7 +294,7 @@ export async function clearQdrantCollection(dealId?: string): Promise<boolean> {
       await ensureQdrantCollection();
     }
   } catch (e) {
-    console.warn('Qdrant clear collection warning:', e);
+    console.warn(`Qdrant clear collection warning: ${formatQdrantError(e)}`);
   }
 
   if (dealId) {

@@ -102,24 +102,14 @@ export async function parseDocumentLayout(
 
   // Attempt 1: Digital PDF text extraction using pdf-parse with readability validation
   try {
-    const uint8 = new Uint8Array(buffer);
     let pdfData: any = null;
 
-    const ParserClass = pdfParseModule.PDFParse || PDFParse;
-    if (typeof ParserClass === 'function' && ParserClass.prototype && typeof ParserClass.prototype.getText === 'function') {
+    const parseFunc = typeof pdfParseModule === 'function' ? pdfParseModule : (pdfParseModule?.default || pdfParseModule?.pdfParse);
+    if (typeof parseFunc === 'function') {
       try {
-        const pdfParser = new ParserClass({ data: uint8 });
-        pdfData = await pdfParser.getText();
+        pdfData = await parseFunc(buffer);
       } catch (err) {
-        console.warn('PDFParse class instantiation failed:', err);
-      }
-    }
-
-    if (!pdfData && typeof pdfParseModule === 'function') {
-      try {
-        pdfData = await pdfParseModule(buffer);
-      } catch (err) {
-        console.warn('pdfParseModule function call failed:', err);
+        // Non-standard PDF or raw stream fallback
       }
     }
 
