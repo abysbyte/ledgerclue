@@ -26,8 +26,11 @@ Powered by **Next.js 16**, **Qdrant Vector Database** (2048-dim vectors), **NVID
 - **🛡️ Forensic Risk Matrix & Automated Audit Response**  
   Generates executive summaries, risk severity scores (0–100), structured risk items (Financial Anomalies, Debt Covenants, Customer Concentration), page citations, and evidence snippets.
 
+- **⚡ Sub-50ms Semantic Caching Engine**  
+  Caches full synthesized due diligence audits via vector cosine similarity ($\ge 0.94$ threshold) in Qdrant (`deal_semantic_cache_2048`) and in-memory fast-paths. Scoped strictly by `deal_id` and automatically invalidated upon new document ingestion to ensure continuous audit freshness.
+
 - **🔄 Zero-Config In-Memory Fallback Engines**  
-  Includes instant fallbacks for Qdrant and Supabase. The platform runs smoothly out of the box for demonstration and development without requiring external server dependencies.
+  Includes instant fallbacks for Qdrant, semantic caching, and Supabase. The platform runs smoothly out of the box for demonstration and development without requiring external server dependencies.
 
 - **🔍 Payload Inspector & SQL Schema Exporter**  
   Built-in UI tools to visually inspect raw Qdrant vector payloads, search scores, and export PostgreSQL schema scripts for Supabase.
@@ -43,8 +46,8 @@ Powered by **Next.js 16**, **Qdrant Vector Database** (2048-dim vectors), **NVID
 | **Vector Engine** | [Qdrant](https://qdrant.tech/) REST Client (2048-dim Cosine distance) |
 | **Relational Metadata** | [Supabase](https://supabase.com/) (PostgreSQL & Storage Buckets) |
 | **Embedding Model** | NVIDIA Nemotron-3-embed-1b (2048 dimensions) |
-| **Document Parsing** | `pdf-parse`, `pdfjs-dist`, Nemotron OCR v2 (`meta/llama-3.2-11b-vision-instruct`, `nvidia/neva-22b`) |
-| **LLM Reasoning** | OpenAI API / NVIDIA API (`meta/llama-3.1-8b-instruct`, `muse-glimmer-30b`, GPT-4o mini) |
+| **LLM Reasoning** | NVIDIA NIM / OpenAI API (`moonshotai/kimi-k3`, `meta/llama-3.1-8b-instruct`, `gpt-4o-mini`) |
+| **Semantic Cache** | Deal-scoped 2048-dim vector cosine similarity cache ($\ge 0.94$) with Qdrant & In-Memory backends |
 | **Testing** | Vitest (Unit Testing), Playwright (E2E Testing) |
 
 ---
@@ -55,6 +58,7 @@ Powered by **Next.js 16**, **Qdrant Vector Database** (2048-dim vectors), **NVID
 ledgerclue/
 ├── app/
 │   ├── api/
+│   │   ├── cache/              # Semantic cache telemetry & invalidation API
 │   │   ├── deals/              # Fetch & create M&A target deals
 │   │   ├── documents/          # Document metadata & deal association
 │   │   ├── ingest/             # Document ingestion endpoint
@@ -78,6 +82,7 @@ ledgerclue/
 │   ├── parser.ts               # Layout-aware PDF/TXT parser & Markdown table formatter
 │   ├── qdrant.ts               # Qdrant vector client & in-memory payload store
 │   ├── rag.ts                  # Multimodal RAG query execution & audit synthesis
+│   ├── semantic-cache.ts       # Deal-scoped vector semantic cache & cosine similarity engine
 │   ├── supabase.ts             # Supabase DB client & in-memory database store
 │   └── types.ts                # TypeScript interfaces (QdrantPayload, RiskItem, etc.)
 ├── e2e/                        # Playwright end-to-end test suites
@@ -143,38 +148,50 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[User Query: e.g. 'What is the Net Debt covenant threshold?'] --> B[Embed Query via Nemotron 2048-dim]
-    B --> C[Qdrant Cosine Vector Search Filtered by deal_id]
-    C --> D[Retrieve Top-K Matching Vector Points]
+    B --> C{Probe Semantic Cache<br/>deal_id + cosine sim >= 0.94}
     
-    D --> E[Extract Context directly from Qdrant Payloads]
-    E -->|No SQL Joins Needed!| F[Extract Raw Markdown Tables & Chart Image URLs]
+    C -- Cache HIT <50ms --> H[Return Cached DueDiligenceResponse]
     
-    F --> G[Synthesize Audit via LLM / muse-glimmer Engine]
-    G --> H[Return DueDiligenceResponse]
+    C -- Cache MISS --> D[Qdrant Cosine Vector Search Filtered by deal_id]
+    D --> E[Retrieve Top-K Matching Vector Points]
     
-    H --> I[Render Executive Summary & Risk Score]
-    H --> J[Render Categorized Risk Matrix with Evidence Snippets]
-    H --> K[Render Exact Markdown Tables & Citation Cards]
+    E --> F[Extract Context directly from Qdrant Payloads]
+    F -->|No SQL Joins Needed!| G[Extract Raw Markdown Tables & Chart Image URLs]
+    
+    G --> I[Synthesize Audit via LLM: moonshotai/kimi-k3 / Llama 3.1]
+    I --> J[Save to Deal Semantic Cache Collection]
+    J --> H
+    
+    H --> K[Render Executive Summary & Deal Risk Index]
+    H --> L[Render Categorized Risk Matrix with Evidence Snippets]
+    H --> M[Render Exact Markdown Tables & Citation Cards]
 ```
 
 ### Retrieval Steps Breakdown
 
-1. **Deal-Filtered Vector Query**:
+1. **2048-Dim Query Embedding**:
    - The user's query is converted to a 2048-dimensional vector via `generateNemotronEmbedding()`.
-   - Qdrant searches the `financial_due_diligence_2048` collection using a payload match filter for `deal_id`.
 
-2. **Direct Context Extraction (No SQL Joins)**:
+2. **Sub-50ms Semantic Cache Probe**:
+   - Before executing vector search or calling the LLM, the pre-computed query vector is checked against `lib/semantic-cache.ts` (`deal_semantic_cache_2048` Qdrant collection + in-memory store).
+   - If a prior query for the same `deal_id` matches with cosine similarity $\ge 0.94$, the cached audit response is returned instantly (<50ms) with a `⚡ Semantic Cache Hit` indicator.
+
+3. **Deal-Filtered Vector Search**:
+   - On a cache miss, Qdrant searches the `financial_due_diligence_2048` collection filtered strictly by `deal_id`.
+
+4. **Direct Context Extraction (No SQL Joins)**:
    - Retrieved payload items contain the text snippet, page number, section heading, **raw parent markdown tables**, and **chart image URLs**.
-   - Context is constructed immediately without secondary database roundtrips.
+   - Context is assembled directly from vector payloads without database roundtrips.
 
-3. **Forensic Audit Synthesis**:
-   - The context is passed to the LLM (`muse-glimmer-30b`, `meta/llama-3.1-8b-instruct`, or fallback auditor).
-   - The LLM returns a structured JSON payload containing:
+5. **Forensic Audit Synthesis**:
+   - Context is passed to the configured LLM (`moonshotai/kimi-k3`, `meta/llama-3.1-8b-instruct`, or fallback financial auditor).
+   - The LLM returns a structured JSON payload:
      - `answer`: Full markdown audit report.
-     - `executive_summary`: 2-sentence summary.
+     - `executive_summary`: 2-sentence executive brief.
      - `risk_score`: Numeric score (0–100).
-     - `risks`: Array of risk items with `category`, `severity` (HIGH/MEDIUM/LOW), `title`, `description`, `evidence_snippet`, and `page_reference`.
-     - `citations`: Exact document source links with relevance scores.
+     - `risks`: Categorized risk items with `severity` (HIGH/MEDIUM/LOW), `title`, `description`, `evidence_snippet`, and `page_reference`.
+     - `citations`: Exact source documents, pages, and relevance scores.
+   - The newly generated audit response is stored in the semantic cache for instant future lookups.
 
 ---
 
@@ -226,14 +243,18 @@ LedgerClue is built to work seamlessly even without external services running:
 
 | Variable | Description | Default / Example |
 | :--- | :--- | :--- |
-| `NVIDIA_API_KEY` | Key for NVIDIA API (Nemotron embeddings & Llama LLMs) | `nvapi-...` |
-| `OPENAI_API_KEY` | Key for OpenAI API (Fallback for LLM & embeddings) | `sk-...` |
+| `KIMI_K3_API_KEY` | Primary API Key for Kimi-k3 / LLM synthesis (NVIDIA NIM or Moonshot) | `nvapi-...` / `sk-...` |
+| `LLM_BASE_URL` | Base URL for OpenAI-compatible endpoint | `https://integrate.api.nvidia.com/v1` |
+| `LLM_MODEL_NAME` | Primary LLM model identifier | `moonshotai/kimi-k3` |
+| `NVIDIA_API_KEY` | Key for NVIDIA API (Nemotron embeddings & Vision OCR) | `nvapi-...` |
+| `NEMOTRON_OCR_API_KEY` | Key for NVIDIA Nemotron OCR visual layout analysis | `nvapi-...` |
+| `SEMANTIC_CACHE_THRESHOLD` | Cosine similarity threshold for cache hits (0.0–1.0) | `0.94` |
+| `SEMANTIC_CACHE_TTL_MS` | Cache Time-To-Live duration in milliseconds | `86400000` (24h) |
 | `QDRANT_URL` | URL of Qdrant vector database server | `http://localhost:6333` |
 | `QDRANT_API_KEY` | API Key for authenticated Qdrant instances | `your_qdrant_key` |
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL | `https://xyz.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role API key | `ey...` |
-| `LLM_MODEL_NAME` | Primary LLM model identifier | `meta/llama-3.1-8b-instruct` |
-| `LLM_BASE_URL` | Optional custom OpenAI-compatible endpoint | `https://integrate.api.nvidia.com/v1` |
+| `OPENAI_API_KEY` | Optional fallback key for OpenAI API | `sk-...` |
 
 ---
 

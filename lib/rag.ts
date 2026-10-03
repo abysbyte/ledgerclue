@@ -1,10 +1,16 @@
 import { generateNemotronEmbedding } from './embeddings';
 import { searchQdrantPayloads } from './qdrant';
 import { DueDiligenceResponse, RiskItem, Citation } from './types';
+import { getSemanticCache, setSemanticCache } from './semantic-cache';
 import { OpenAI } from 'openai';
 
-const apiKey = process.env.MUSE_GLIMMER_API_KEY || process.env.NVIDIA_API_KEY || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY;
-const baseURL = process.env.LLM_BASE_URL || undefined;
+function sanitizeBaseUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  return url.trim().replace(/\/chat\/completions\/?$/i, '').replace(/\/+$/, '');
+}
+
+const apiKey = process.env.KIMI_K3_API_KEY || process.env.LLM_API_KEY || process.env.MUSE_GLIMMER_API_KEY || process.env.NVIDIA_API_KEY || process.env.OPENAI_API_KEY;
+const baseURL = sanitizeBaseUrl(process.env.LLM_BASE_URL);
 const modelName = process.env.LLM_MODEL_NAME || 'meta/llama-3.1-8b-instruct';
 
 const llmClient = new OpenAI({
@@ -17,10 +23,12 @@ const llmClient = new OpenAI({
  * 
  * Rules:
  * 1. Convert user query to 2048-dim vector embedding via Nemotron-3-embed-1b.
- * 2. Search Qdrant collection filtered by `deal_id`.
- * 3. Retrieve matching payloads (including raw parent markdown tables!).
- * 4. Assemble context directly from Qdrant payloads without complex SQL joins.
- * 5. Synthesize audit response using LLM / vision model with risk assessment matrix.
+ * 2. Check semantic cache scoped by `deal_id` for fast-path retrieval (<50ms).
+ * 3. Search Qdrant collection filtered by `deal_id`.
+ * 4. Retrieve matching payloads (including raw parent markdown tables!).
+ * 5. Assemble context directly from Qdrant payloads without complex SQL joins.
+ * 6. Synthesize audit response using LLM / vision model with risk assessment matrix.
+ * 7. Store synthesized audit response in semantic cache for instant reuse.
  */
 export async function executeDueDiligenceQuery(
   dealId: string,
@@ -28,6 +36,12 @@ export async function executeDueDiligenceQuery(
 ): Promise<DueDiligenceResponse> {
   // Step 1: Embed user query into 2048-dim Nemotron vector space
   const queryVector2048 = await generateNemotronEmbedding(userQuery);
+
+  // Step 1.5: Fast-Path Semantic Cache Probe (Deal-scoped, cosine threshold >= 0.94)
+  const cachedHit = await getSemanticCache(dealId, queryVector2048, userQuery);
+  if (cachedHit) {
+    return cachedHit;
+  }
 
   // Step 2: Vector similarity search in Qdrant filtered by deal_id
   const citations: Citation[] = await searchQdrantPayloads(dealId, queryVector2048, 6);
@@ -97,7 +111,7 @@ Format your response STRICTLY as a single valid JSON object with NO preamble or 
       if (responseContent) {
         const parsed = parseLlmResponseJson(responseContent);
 
-        return {
+        const auditResponse: DueDiligenceResponse = {
           answer: parsed.answer || 'Analysis complete based on retrieved Qdrant vectors.',
           executive_summary: parsed.executive_summary || 'Executive audit completed based on retrieved vector payload markdown tables.',
           risk_score: typeof parsed.risk_score === 'number' ? parsed.risk_score : 65,
@@ -108,6 +122,11 @@ Format your response STRICTLY as a single valid JSON object with NO preamble or 
           query: userQuery,
           deal_id: dealId,
         };
+
+        // Persist newly synthesized LLM audit to semantic cache
+        await setSemanticCache(dealId, queryVector2048, userQuery, auditResponse);
+
+        return auditResponse;
       }
     } catch (e) {
       console.warn(`LLM Synthesis API call to model ${modelName} failed, using fallback financial auditor reasoning:`, e);
@@ -115,7 +134,9 @@ Format your response STRICTLY as a single valid JSON object with NO preamble or 
   }
 
   // Fallback Financial Auditor Logic (Ensures instant demo functionality)
-  return generateFallbackAuditResponse(userQuery, dealId, citations, rawTables, chartLinks);
+  const fallbackResponse = generateFallbackAuditResponse(userQuery, dealId, citations, rawTables, chartLinks);
+  await setSemanticCache(dealId, queryVector2048, userQuery, fallbackResponse);
+  return fallbackResponse;
 }
 
 function generateFallbackAuditResponse(
@@ -128,7 +149,7 @@ function generateFallbackAuditResponse(
   const queryLower = userQuery.toLowerCase();
   const risks: RiskItem[] = [];
 
-  let answer = `### Executive Forensic Audit Summary (Model: muse-glimmer-30b Engine)\n\nBased on parent-child table parsing and Qdrant payload retrieval, we completed a forensic review of the target's financial disclosures.\n\n`;
+  let answer = `### Executive Forensic Audit Summary (Model: ${modelName} Engine)\n\nBased on parent-child table parsing and Qdrant payload retrieval, we completed a forensic review of the target's financial disclosures.\n\n`;
 
   if (queryLower.includes('ebitda') || queryLower.includes('earnings') || queryLower.includes('add-back') || queryLower.includes('profit')) {
     answer += `#### Quality of Earnings & EBITDA Adjustment Findings\n

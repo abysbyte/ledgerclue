@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Sparkles, Send, ShieldAlert, AlertTriangle, CheckCircle, Table, Image as ImageIcon, ExternalLink, HelpCircle, Loader2, Info } from 'lucide-react';
+import { Sparkles, Send, ShieldAlert, AlertTriangle, CheckCircle, Table, Image as ImageIcon, ExternalLink, HelpCircle, Loader2, Info, Zap } from 'lucide-react';
 import { Deal, DueDiligenceResponse, Citation, RiskItem } from '@/lib/types';
 
 interface RagChatProps {
@@ -173,6 +173,17 @@ export const RagChat: React.FC<RagChatProps> = ({ currentDeal }) => {
               <div>
                 <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Forensic Due Diligence Analysis</span>
                 <h3 className="text-lg font-bold text-slate-100">{response.query}</h3>
+                {response.cached && (
+                  <div className="flex items-center space-x-1.5 mt-2 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[11px] font-medium w-fit animate-in fade-in duration-200">
+                    <Zap className="w-3.5 h-3.5 text-emerald-400 fill-emerald-400/30" />
+                    <span>Semantic Cache Hit ({Math.round((response.cache_similarity || 1) * 100)}% match)</span>
+                    {response.matched_cached_query && response.matched_cached_query !== response.query && (
+                      <span className="text-slate-400 text-[10px] hidden sm:inline">
+                        — matched &quot;{response.matched_cached_query}&quot;
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Risk Score Indicator */}

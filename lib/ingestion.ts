@@ -3,9 +3,21 @@ import { generateNemotronEmbedding } from './embeddings';
 import { upsertQdrantPoints, deleteQdrantPointsForDocument } from './qdrant';
 import { createDocumentRecord, uploadChartImage } from './supabase';
 import { IngestionResult, QdrantPoint, QdrantPayload } from './types';
+import { invalidateSemanticCache } from './semantic-cache';
 import { OpenAI } from 'openai';
+function sanitizeBaseUrl(url?: string): string | undefined {
+  if (!url) return undefined;
+  return url.trim().replace(/\/chat\/completions\/?$/i, '').replace(/\/+$/, '');
+}
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || 'placeholder' });
+const llmApiKey = process.env.KIMI_K3_API_KEY || process.env.LLM_API_KEY || process.env.MUSE_GLIMMER_API_KEY || process.env.OPENAI_API_KEY;
+const llmBaseURL = sanitizeBaseUrl(process.env.LLM_BASE_URL);
+const summarizerModel = process.env.LLM_MODEL_NAME || 'gpt-4o-mini';
+
+const openai = new OpenAI({
+  apiKey: llmApiKey || 'placeholder',
+  baseURL: llmBaseURL || undefined,
+});
 
 /**
  * Core Parent-Child Ingestion Engine
@@ -157,6 +169,10 @@ export async function executeDocumentIngestion(
   await upsertQdrantPoints(qdrantPoints);
   log(`Indexed ${qdrantPoints.length} points into Qdrant collection with 2048 dimensions.`);
 
+  // Invalidate cached due diligence answers for this deal so new disclosures take effect
+  await invalidateSemanticCache(dealId);
+  log(`Invalidated semantic cache for deal ${dealId} to ensure audit freshness.`);
+
   await createDocumentRecord({
     deal_id: dealId,
     file_name: fileName,
@@ -185,10 +201,10 @@ export async function executeDocumentIngestion(
 }
 
 async function summarizeMarkdownTableWithLLM(markdownTable: string, heading?: string): Promise<string> {
-  if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'placeholder') {
+  if (llmApiKey && llmApiKey !== 'placeholder') {
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: summarizerModel,
         messages: [
           {
             role: 'system',

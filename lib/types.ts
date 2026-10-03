@@ -108,4 +108,8 @@ export interface DueDiligenceResponse {
   charts_referenced: { title: string; image_url: string }[];
   query: string;
   deal_id: string;
+  cached?: boolean;
+  cache_similarity?: number;
+  matched_cached_query?: string;
+  cache_timestamp?: string;
 }
